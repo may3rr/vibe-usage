@@ -88,10 +88,17 @@ test('Claude parser counts cache creation, keeps the initial cwd project, and dr
       model: 'claude-opus-4-8',
       project: 'my-hyphen-project',
       bucketStart: '2026-07-21T10:00:00.000Z',
-      inputTokens: 28,
+      // Cache writes are no longer folded into input: Anthropic prices the two
+      // TTLs at 1.25x / 2x the base input rate, so they travel as their own
+      // columns and the server can bill them.
+      inputTokens: 11,
       outputTokens: 7,
       cachedInputTokens: 13,
       reasoningOutputTokens: 0,
+      cacheCreation5mTokens: 5,
+      cacheCreation1hTokens: 12,
+      // Unchanged by the split (was 28 + 7 + 0; now 11 + 7 + 0 + 5 + 12) so no
+      // bucket falls out of the server's `total_tokens > 0` filter.
       totalTokens: 35,
     });
     assert.equal(result.sessions.length, 1);
@@ -285,11 +292,16 @@ test('Claude parser counts one API call once across its content-block lines', as
         inputTokens: acc.inputTokens + bucket.inputTokens,
         cachedInputTokens: acc.cachedInputTokens + bucket.cachedInputTokens,
         outputTokens: acc.outputTokens + bucket.outputTokens,
+        cacheCreationTokens: acc.cacheCreationTokens +
+          bucket.cacheCreation5mTokens + bucket.cacheCreation1hTokens,
       }),
-      { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+      { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, cacheCreationTokens: 0 },
     );
 
-    assert.equal(totals.inputTokens, 102, 'input + cache creation counted once');
+    assert.equal(totals.inputTokens, 2, 'input counted once');
+    // No `cache_creation` TTL breakdown in this fixture, so the whole total is
+    // booked to the cheaper 5m bucket.
+    assert.equal(totals.cacheCreationTokens, 100, 'cache creation counted once');
     assert.equal(totals.cachedInputTokens, 61608, 'cache read counted once');
     assert.equal(totals.outputTokens, 211, 'keeps the final line, not the partial one');
   } finally {
@@ -381,4 +393,91 @@ test('explicit Claude roots are additive and copied sessions remain deduplicated
       assert.ok(missing.warnings.length);
     });
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Claude parser books an unexplained cache-creation remainder to the cheaper 5m bucket', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-claude-ttl-'));
+  try {
+    writeSession(root, '-Users-dev-proj', 'session-ttl', [
+      // No `cache_creation` breakdown at all — every token is unexplained.
+      record({
+        uuid: 'no-breakdown',
+        timestamp: '2026-07-21T10:00:00.000Z',
+        cwd: '/Users/dev/proj',
+        usage: { input_tokens: 3, output_tokens: 1, cache_creation_input_tokens: 400 },
+      }),
+      // Breakdown present but short of the total: 90 explained (60 + 30), and
+      // the remaining 10 must land on 5m, never on 1h.
+      record({
+        uuid: 'partial-breakdown',
+        timestamp: '2026-07-21T11:00:00.000Z',
+        cwd: '/Users/dev/proj',
+        usage: {
+          input_tokens: 3,
+          output_tokens: 1,
+          cache_creation_input_tokens: 100,
+          cache_creation: {
+            ephemeral_5m_input_tokens: 60,
+            ephemeral_1h_input_tokens: 30,
+          },
+        },
+      }),
+    ]);
+
+    const result = await withClaudeRoots([root], () => parse());
+    const byStart = new Map(result.buckets.map((b) => [b.bucketStart, b]));
+
+    const noBreakdown = byStart.get('2026-07-21T10:00:00.000Z');
+    assert.equal(noBreakdown.inputTokens, 3);
+    assert.equal(noBreakdown.cacheCreation5mTokens, 400);
+    assert.equal(noBreakdown.cacheCreation1hTokens, 0);
+
+    const partial = byStart.get('2026-07-21T11:00:00.000Z');
+    assert.equal(partial.inputTokens, 3);
+    assert.equal(partial.cacheCreation5mTokens, 70, '60 declared + 10 unexplained');
+    assert.equal(partial.cacheCreation1hTokens, 30, '1h is never inflated by the remainder');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Claude parser tags fast-mode records so the server can bill the priority tier', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-claude-fast-'));
+  try {
+    writeSession(root, '-Users-dev-proj', 'session-fast', [
+      record({
+        uuid: 'standard-call',
+        timestamp: '2026-07-21T10:00:00.000Z',
+        cwd: '/Users/dev/proj',
+        model: 'claude-opus-5',
+        usage: { input_tokens: 10, output_tokens: 2, speed: 'standard' },
+      }),
+      record({
+        uuid: 'fast-call',
+        timestamp: '2026-07-21T11:00:00.000Z',
+        cwd: '/Users/dev/proj',
+        model: 'claude-opus-5',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 2,
+          speed: 'fast',
+          cache_creation_input_tokens: 40,
+          cache_creation: { ephemeral_5m_input_tokens: 40, ephemeral_1h_input_tokens: 0 },
+        },
+      }),
+    ]);
+
+    const result = await withClaudeRoots([root], () => parse());
+    const models = result.buckets.map((b) => b.model).sort();
+    assert.deepEqual(models, ['claude-opus-5', 'claude-opus-5-fast']);
+
+    const fast = result.buckets.find((b) => b.model === 'claude-opus-5-fast');
+    assert.equal(fast.inputTokens, 10);
+    assert.equal(fast.cacheCreation5mTokens, 40);
+    // A standard-speed record must not pick up the marker.
+    const standard = result.buckets.find((b) => b.model === 'claude-opus-5');
+    assert.equal(standard.inputTokens, 10);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

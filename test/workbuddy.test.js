@@ -126,6 +126,8 @@ test('WorkBuddy maps routed models, exclusive usage, deduplicated requests, and 
       outputTokens: 4,
       cachedInputTokens: 7488,
       reasoningOutputTokens: 27,
+      cacheCreation5mTokens: 0,
+      cacheCreation1hTokens: 0,
       totalTokens: 27367,
     });
     assert.deepEqual(byModel['model-routed-by-auto'], {
@@ -137,6 +139,8 @@ test('WorkBuddy maps routed models, exclusive usage, deduplicated requests, and 
       outputTokens: 20,
       cachedInputTokens: 40,
       reasoningOutputTokens: 0,
+      cacheCreation5mTokens: 0,
+      cacheCreation1hTokens: 0,
       totalTokens: 80,
     });
     assert.equal(result.sessions.length, 1);
@@ -209,6 +213,8 @@ test('WorkBuddy parses function_call usage and raw token details', async () => {
       outputTokens: 15,
       cachedInputTokens: 40,
       reasoningOutputTokens: 5,
+      cacheCreation5mTokens: 0,
+      cacheCreation1hTokens: 0,
       totalTokens: 80,
     }]);
     assert.equal(result.sessions.length, 1);

@@ -81,6 +81,8 @@ test('legacy parser: seconds timestamps, cache fields, no now-fallback, both sto
     outputTokens: 2,
     cachedInputTokens: 10, // 4 + 6 (dedup by message_id), cache-only record counted
     reasoningOutputTokens: 0,
+    cacheCreation5mTokens: 0,
+    cacheCreation1hTokens: 0,
     totalTokens: 15,
   });
 

@@ -57,15 +57,48 @@ function projectFromRelative(relative) {
   return parts.at(-1) || 'unknown';
 }
 
-function cacheCreationTokens(usage) {
+/**
+ * Cache-creation (prompt-cache write) tokens, split by TTL.
+ *
+ * Anthropic bills the two TTLs at different multiples of the base input rate
+ * (5-minute writes 1.25x, 1-hour writes 2x — platform.claude.com/docs/en/
+ * about-claude/pricing), so the split is a price-changing dimension and has to
+ * survive to the server. Folding both into `input_tokens` (what this parser did
+ * before 2026-09-16) under-billed every Claude bucket by 13-33%.
+ *
+ * Current Claude logs carry both the `cache_creation_input_tokens` total and its
+ * `cache_creation` TTL breakdown. When the breakdown is missing, or adds up to
+ * less than the total, the unexplained remainder is booked to the **5m** bucket:
+ * that is the cheaper of the two multipliers, so a partially populated log can
+ * only ever under-state cost, never over-state it. This preserves the old
+ * max(direct, split) total exactly — only its attribution is new.
+ */
+function cacheCreationSplit(usage) {
   const direct = toCount(usage.cache_creation_input_tokens);
   const breakdown = usage.cache_creation || {};
-  const split =
-    toCount(breakdown.ephemeral_5m_input_tokens) +
-    toCount(breakdown.ephemeral_1h_input_tokens);
-  // Current Claude logs carry both the total and its TTL breakdown. max()
-  // avoids double-counting while remaining tolerant of partially populated logs.
-  return Math.max(direct, split);
+  const fiveMinute = toCount(breakdown.ephemeral_5m_input_tokens);
+  const oneHour = toCount(breakdown.ephemeral_1h_input_tokens);
+  const split = fiveMinute + oneHour;
+  if (split >= direct) return { fiveMinute, oneHour };
+  return { fiveMinute: fiveMinute + (direct - split), oneHour };
+}
+
+// Fast mode (research preview, Claude Opus 5 / Opus 4.8) is billed at 2x the
+// standard input and output rate, with the cache multipliers stacking on top.
+// Claude Code records it as `message.usage.speed` ('standard' | 'fast'); accept
+// `message.speed` too so a build that moves the field keeps working. The server
+// pricing map keys the premium rate off a trailing `-fast` marker
+// (TIER_MARKER_SUFFIX -> tiers.priority), so tag the model here. A model with no
+// published priority tier falls back to its base rate server-side, which makes
+// the marker safe to append unconditionally.
+function isFastMode(usage, message) {
+  const speed = usage?.speed ?? message?.speed;
+  return typeof speed === 'string' && speed.trim().toLowerCase() === 'fast';
+}
+
+function applySpeedMarker(model, fast) {
+  if (!fast || !model) return model;
+  return model.endsWith('-fast') ? model : `${model}-fast`;
 }
 
 function candidateIsBetter(next, current) {
@@ -225,13 +258,20 @@ async function scanProjectCandidate(candidate) {
       ? obj.message.model.trim()
       : '';
     if (rawModel && rawModel !== '<synthetic>') lastModel = rawModel;
-    const model = rawModel && rawModel !== '<synthetic>'
+    const baseModel = rawModel && rawModel !== '<synthetic>'
       ? rawModel
       : lastModel || 'claude-unknown';
-    const inputTokens = toCount(usage.input_tokens) + cacheCreationTokens(usage);
+    const model = applySpeedMarker(baseModel, isFastMode(usage, obj.message));
+    const cacheCreation = cacheCreationSplit(usage);
+    const inputTokens = toCount(usage.input_tokens);
     const outputTokens = toCount(usage.output_tokens);
     const cachedInputTokens = toCount(usage.cache_read_input_tokens);
-    const usageScore = inputTokens + outputTokens + cachedInputTokens;
+    const cacheCreation5mTokens = cacheCreation.fiveMinute;
+    const cacheCreation1hTokens = cacheCreation.oneHour;
+    // Unchanged from when cache writes lived inside inputTokens, so the
+    // "keep the most complete duplicate" ranking keeps its old ordering.
+    const usageScore = inputTokens + outputTokens + cachedInputTokens +
+      cacheCreation5mTokens + cacheCreation1hTokens;
 
     // Synthetic bookkeeping messages are common and carry zero usage. Do not
     // inflate the CLI's bucket count with rows the server will discard anyway.
@@ -248,6 +288,8 @@ async function scanProjectCandidate(candidate) {
       outputTokens,
       cachedInputTokens,
       reasoningOutputTokens: 0,
+      cacheCreation5mTokens,
+      cacheCreation1hTokens,
     });
   });
 

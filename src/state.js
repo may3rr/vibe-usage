@@ -75,6 +75,11 @@ export function bucketHash(b) {
     b.cachedInputTokens || 0,
     b.reasoningOutputTokens || 0,
     b.totalTokens || 0,
+    // Cache writes carry a different unit price per TTL, so a bucket whose only
+    // change is a 5m<->1h reclassification must still re-upload — totalTokens
+    // alone cannot see that move.
+    b.cacheCreation5mTokens || 0,
+    b.cacheCreation1hTokens || 0,
   ]);
 }
 

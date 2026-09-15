@@ -100,6 +100,8 @@ test('parse reads exact token usage and session timing from MiMoCode SQLite', as
       outputTokens: 30,
       cachedInputTokens: 400,
       reasoningOutputTokens: 10,
+      cacheCreation5mTokens: 0,
+      cacheCreation1hTokens: 0,
       totalTokens: 180,
     }]);
     assert.equal(result.sessions.length, 1);

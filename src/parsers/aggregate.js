@@ -52,6 +52,12 @@ export function aggregateToBuckets(entries) {
         outputTokens: 0,
         cachedInputTokens: 0,
         reasoningOutputTokens: 0,
+        // Prompt-cache *writes*, split by TTL. Anthropic prices them at 1.25x
+        // (5m) and 2x (1h) the base input rate, so they cannot be folded into
+        // inputTokens without under-billing. Parsers that cannot tell the two
+        // TTLs apart leave these at 0 and keep their existing behaviour.
+        cacheCreation5mTokens: 0,
+        cacheCreation1hTokens: 0,
       });
     }
 
@@ -60,6 +66,8 @@ export function aggregateToBuckets(entries) {
     b.outputTokens += e.outputTokens || 0;
     b.cachedInputTokens += e.cachedInputTokens || 0;
     b.reasoningOutputTokens += e.reasoningOutputTokens || 0;
+    b.cacheCreation5mTokens += e.cacheCreation5mTokens || 0;
+    b.cacheCreation1hTokens += e.cacheCreation1hTokens || 0;
   }
 
   // Clamp after summation, not per entry — rounding each entry first would
@@ -69,13 +77,22 @@ export function aggregateToBuckets(entries) {
     const outputTokens = toTokenCount(b.outputTokens);
     const cachedInputTokens = toTokenCount(b.cachedInputTokens);
     const reasoningOutputTokens = toTokenCount(b.reasoningOutputTokens);
+    const cacheCreation5mTokens = toTokenCount(b.cacheCreation5mTokens);
+    const cacheCreation1hTokens = toTokenCount(b.cacheCreation1hTokens);
     return {
       ...b,
       inputTokens,
       outputTokens,
       cachedInputTokens,
       reasoningOutputTokens,
-      totalTokens: inputTokens + outputTokens + reasoningOutputTokens,
+      cacheCreation5mTokens,
+      cacheCreation1hTokens,
+      // Cache writes stay inside totalTokens: they used to arrive folded into
+      // inputTokens, and the server uses this field only as a `> 0` liveness
+      // filter. Keeping them in makes the number bit-identical to what the same
+      // logs produced before the split, so no bucket drops out of any view.
+      totalTokens: inputTokens + outputTokens + reasoningOutputTokens +
+        cacheCreation5mTokens + cacheCreation1hTokens,
     };
   });
 }

@@ -182,8 +182,35 @@ Every parser produces two parallel data streams:
 Per-message token usage aggregated into 30-minute windows via `aggregateToBuckets()`.
 
 ```js
-{ source, model, project, bucketStart, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens, totalTokens }
+{ source, model, project, bucketStart, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens, cacheCreation5mTokens, cacheCreation1hTokens, totalTokens }
 ```
+
+**Cache writes are a priced dimension, not input** (2026-09-16). Anthropic bills
+prompt-cache writes at **1.25x** (5-minute TTL) and **2x** (1-hour TTL) the base
+input rate, so `cacheCreation5mTokens` / `cacheCreation1hTokens` travel as their
+own columns instead of being folded into `inputTokens` the way `claude-code` did
+before. Folding them in under-billed real Claude buckets by 13-33% depending on
+the model. Rules for a parser that emits them:
+
+- Only split when the log actually distinguishes the two TTLs. An
+  unexplained remainder (a total with no breakdown, or a breakdown that sums to
+  less than the total) goes to the **5m** bucket — the cheaper multiplier, so a
+  partial log can only under-state cost.
+- `totalTokens` still includes them, so the number is bit-identical to what the
+  same log produced when they lived inside `inputTokens`; the server uses that
+  field only as a `> 0` liveness filter and no bucket may silently drop out.
+- Parsers that cannot tell the TTLs apart (the Pi family, Cline SDK, DSH, Cindy)
+  keep folding cache writes into `inputTokens` and leave both new fields at 0.
+  That is a known remaining divergence, not an invariant.
+- `state.js` `bucketHash()` covers both fields, so a pure 5m↔1h reclassification
+  still re-uploads.
+
+**Fast mode is a service tier.** Claude Code records `message.usage.speed`
+(`'standard'` | `'fast'`); `'fast'` doubles Opus 5 / Opus 4.8 input and output
+rates. The parser appends a `-fast` marker to the model id, which the server's
+pricing map resolves through `TIER_MARKER_SUFFIX` → `tiers.priority`. Models
+with no published priority tier fall back to their base rate, so the marker is
+safe to append unconditionally.
 
 ### Track 2: Sessions
 Timing events fed to `extractSessions()` for interaction metadata.

@@ -58,7 +58,8 @@ test('Cola is registered and parses exclusive tokens without retaining content o
   assert.deepEqual(result.buckets[0], {
     source: 'cola', model: 'claude-haiku-4-5-20251001', project: 'project',
     bucketStart: '2026-09-10T01:00:00.000Z', inputTokens: 110,
-    outputTokens: 16, reasoningOutputTokens: 4, cachedInputTokens: 30, totalTokens: 130,
+    outputTokens: 16, reasoningOutputTokens: 4, cachedInputTokens: 30,
+    cacheCreation5mTokens: 0, cacheCreation1hTokens: 0, totalTokens: 130,
   });
   assert.equal(result.sessions.length, 1);
   assert.equal(result.sessions[0].messageCount, 2);

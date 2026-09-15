@@ -90,6 +90,8 @@ test('current Kimi parser counts all delta scopes, cache creation, and subagents
     outputTokens: 4,
     cachedInputTokens: 13,
     reasoningOutputTokens: 0,
+    cacheCreation5mTokens: 0,
+    cacheCreation1hTokens: 0,
     totalTokens: 32,
   });
 

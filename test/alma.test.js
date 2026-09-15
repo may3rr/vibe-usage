@@ -144,6 +144,8 @@ test('Alma merges provider-prefixed forms of the same model into one bucket', as
         outputTokens: 10,
         cachedInputTokens: 0,
         reasoningOutputTokens: 0,
+        cacheCreation5mTokens: 0,
+        cacheCreation1hTokens: 0,
         totalTokens: 40,
       },
     ]);
@@ -185,6 +187,8 @@ test('Alma emits usage buckets without chat content or session metadata', async 
         outputTokens: 45,
         cachedInputTokens: 400,
         reasoningOutputTokens: 15,
+        cacheCreation5mTokens: 0,
+        cacheCreation1hTokens: 0,
         totalTokens: 230,
       },
       {
@@ -196,6 +200,8 @@ test('Alma emits usage buckets without chat content or session metadata', async 
         outputTokens: 3,
         cachedInputTokens: 2,
         reasoningOutputTokens: 0,
+        cacheCreation5mTokens: 0,
+        cacheCreation1hTokens: 0,
         totalTokens: 11,
       },
     ]);
