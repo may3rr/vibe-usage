@@ -1,9 +1,45 @@
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
-import { homedir } from 'node:os';
+import { getDroidSessionsDir, getDroidSettingsPaths } from '../tools.js';
 import { aggregateToBuckets, extractSessions } from './aggregate.js';
+import { readJsonSafe } from './fs-utils.js';
 
-const DROID_SESSIONS_DIR = join(homedir(), '.factory', 'sessions');
+// Factory session sidecars store the local slot id (`custom:gpt-6-astra-[gw]-0`),
+// not the API model. `customModels[].model` is what the provider actually sees.
+// A bare routing word would collide with Cursor's pricing entry (PR #83).
+const ROUTING_TIER_IDS = new Set([
+  'auto', 'default', 'default-model', 'fast', 'turbo', 'lite', 'ultimate', 'performance', 'efficient',
+]);
+const CUSTOM_SLOT_ID = /^custom:(.+)-\[([^\]]+)\]-(\d+)$/;
+
+export function loadDroidCustomModelCatalog() {
+  const catalog = new Map();
+  for (const settingsPath of getDroidSettingsPaths()) {
+    const data = readJsonSafe(settingsPath);
+    if (!data) continue;
+    for (const list of [data.customModels, data.custom_models]) {
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (!entry || typeof entry !== 'object') continue;
+        const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+        const model = typeof entry.model === 'string' ? entry.model.trim() : '';
+        if (id && model) catalog.set(id, model);
+      }
+    }
+  }
+  return catalog;
+}
+
+export function resolveDroidModel(raw, catalog = new Map()) {
+  const id = typeof raw === 'string' ? raw.trim() : '';
+  if (!id) return 'unknown';
+  const mapped = catalog instanceof Map ? catalog.get(id) : undefined;
+  const resolved = (typeof mapped === 'string' && mapped.trim())
+    ? mapped.trim()
+    : (id.match(CUSTOM_SLOT_ID)?.[1] || id);
+  const lower = resolved.toLowerCase();
+  return ROUTING_TIER_IDS.has(lower) ? `droid-${lower}` : resolved;
+}
 
 function findJsonlFiles(dir) {
   const results = [];
@@ -37,7 +73,8 @@ function toSafeNumber(value) {
 export async function parse() {
   const entries = [];
   const sessionEvents = [];
-  const sessionFiles = findJsonlFiles(DROID_SESSIONS_DIR);
+  const sessionFiles = findJsonlFiles(getDroidSessionsDir());
+  const catalog = loadDroidCustomModelCatalog();
 
   for (const filePath of sessionFiles) {
     const sessionId = basename(filePath, '.jsonl');
@@ -92,20 +129,28 @@ export async function parse() {
     const tokenUsage = settings?.tokenUsage;
     if (!tokenUsage) continue;
 
+    // Factory already stores uncached prompt in inputTokens. Its session log
+    // records `inputTokens` + `cacheReadInputTokens` = `totalInputTokens`;
+    // subtracting cacheReadTokens here zeros BYOK input whenever cache > input.
     const cacheReadTokens = toSafeNumber(tokenUsage.cacheReadTokens);
     const thinkingTokens = toSafeNumber(tokenUsage.thinkingTokens);
-    const inputTokens = Math.max(0, toSafeNumber(tokenUsage.inputTokens) - cacheReadTokens);
+    const cacheCreation5mTokens = toSafeNumber(tokenUsage.cacheCreationTokens);
+    const inputTokens = toSafeNumber(tokenUsage.inputTokens);
     const outputTokens = Math.max(0, toSafeNumber(tokenUsage.outputTokens) - thinkingTokens);
+    if (inputTokens + outputTokens + cacheReadTokens + thinkingTokens + cacheCreation5mTokens === 0) {
+      continue;
+    }
 
     entries.push({
       source: 'droid',
-      model: settings.model || 'unknown',
+      model: resolveDroidModel(settings.model, catalog),
       project,
       timestamp: firstMessageTimestamp,
       inputTokens,
       outputTokens,
       cachedInputTokens: cacheReadTokens,
       reasoningOutputTokens: thinkingTokens,
+      cacheCreation5mTokens,
     });
   }
 
