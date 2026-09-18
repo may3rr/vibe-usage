@@ -1,5 +1,6 @@
 import { parse as parseClaudeCode } from './claude-code.js';
 import { parse as parseCline } from './cline.js';
+import { parse as parseCodeartsAgent } from './codearts-agent.js';
 import { parse as parseCodex } from './codex.js';
 import { parse as parseCopilotCli } from './copilot-cli.js';
 import { parse as parseCraftAgent } from './craft-agent.js';
@@ -33,6 +34,7 @@ import { parse as parseCodebuddy } from './codebuddy.js';
 
 export const parsers = {
   'claude-code': parseClaudeCode,
+  'codearts-agent': parseCodeartsAgent,
   'codex': parseCodex,
   'cola': parseCola,
   'grok': parseGrok,
