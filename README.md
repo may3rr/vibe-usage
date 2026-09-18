@@ -249,6 +249,10 @@ For OpenCode, each root uses its SQLite database when present; only roots withou
 
 The first `npx @vibe-cafe/vibe-usage` run installs a user-level service (systemd on Linux, launchd on macOS, Task Scheduler on Windows — no admin rights needed) that syncs every 30 minutes and starts automatically on login. Nothing else to do.
 
+Switching the CLI to a different account (running `init` again, or `config set apiKey`) rebinds the upload state, so the next sync re-uploads your full local history to the new account instead of treating it as already sent.
+
+换绑账号后（重新 `init` 或 `config set apiKey`），下一次同步会自动全量重传本地历史，不会因为旧账号的同步记录而漏传。
+
 <details>
 <summary>Managing the service, and how it is launched</summary>
 
