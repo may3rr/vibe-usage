@@ -133,11 +133,11 @@ test('CodeArts Agent counts child calls but folds child timing into one human se
       model: 'GLM-5.2',
       project: 'root-project',
       bucketStart: '2026-09-17T01:00:00.000Z',
-      inputTokens: 17,
+      inputTokens: 15,
       outputTokens: 7,
       cachedInputTokens: 7,
       reasoningOutputTokens: 5,
-      cacheCreation5mTokens: 0,
+      cacheCreation5mTokens: 2,
       cacheCreation1hTokens: 0,
       totalTokens: 29,
     });
@@ -205,7 +205,7 @@ test('CodeArts Agent accepts model/timestamp variants and cache-only usage', asy
 
     const result = await withRoots([root], parse);
     const byModel = Object.fromEntries(result.buckets.map(bucket => [bucket.model, bucket]));
-    assert.equal(byModel['glm-5.3-flash'].inputTokens, 9);
+    assert.equal(byModel['glm-5.3-flash'].cacheCreation5mTokens, 9);
     assert.equal(byModel['glm-5.3-flash'].bucketStart, '2026-09-17T01:00:00.000Z');
     assert.equal(byModel['deepseek-v4-flash-0731'].reasoningOutputTokens, 4);
     assert.equal(byModel['ignored-zero'], undefined);
@@ -302,4 +302,33 @@ test('CodeArts Agent query selects only allow-listed metadata', async () => {
   assert.doesNotMatch(source, /json_extract\(m\.data, '\$\.(?:content|tools|error|cost)'\)/);
   assert.doesNotMatch(source, /\b(?:part|account|event)\b\s+AS\s+/i);
   assert.match(source, /json_extract\(m\.data, '\$\.tokens\.cache\.read'\)/);
+});
+
+test('CodeArts Agent never surfaces prompt/tool content in its parsed output', async () => {
+  // The source-text regex above only catches a query that *names* a banned
+  // column. It cannot catch a query that renames its way past the regex
+  // (e.g. `SELECT m.data AS payload`) and hands the whole JSON blob through.
+  // This fixture plants a sentinel inside both a top-level field and a
+  // nested `parts` array the way a real message body would carry it, then
+  // asserts the sentinel never reaches the parsed result.
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-codearts-agent-privacy-'));
+  const CANARY = 'CANARY_PROMPT_TEXT_DO_NOT_LEAK';
+  try {
+    createDb(root, `
+      ${session('s1', null, '/work/project')}
+      ${message('u1', 's1', start, 'user', { content: CANARY })}
+      ${message('a1', 's1', start + 1_000, 'assistant', {
+        modelID: 'model',
+        tokens: { input: 4, output: 2 },
+        content: CANARY,
+        parts: [{ type: 'text', text: CANARY }],
+      })}
+    `);
+
+    const result = await withRoots([root], parse);
+    const serialized = JSON.stringify(result);
+    assert.doesNotMatch(serialized, new RegExp(CANARY));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

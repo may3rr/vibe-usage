@@ -153,11 +153,16 @@ export async function parse() {
     }
 
     if (row.role !== 'assistant') continue;
-    const inputTokens = toCount(row.inputTokens) + toCount(row.cacheWriteTokens);
+    const inputTokens = toCount(row.inputTokens);
     const outputTokens = toCount(row.outputTokens);
     const cachedInputTokens = toCount(row.cacheReadTokens);
     const reasoningOutputTokens = toCount(row.reasoningTokens);
-    if (inputTokens + outputTokens + cachedInputTokens + reasoningOutputTokens === 0) continue;
+    // The store only gives one cache-write total with no per-TTL breakdown,
+    // so an untyped write is priced as the cheaper 5m bucket rather than
+    // folded into input: better to undercharge than overcharge an unknown TTL.
+    const cacheCreation5mTokens = toCount(row.cacheWriteTokens);
+    if (inputTokens + outputTokens + cachedInputTokens + reasoningOutputTokens
+      + cacheCreation5mTokens === 0) continue;
 
     entries.push({
       source: SOURCE,
@@ -168,6 +173,7 @@ export async function parse() {
       outputTokens,
       cachedInputTokens,
       reasoningOutputTokens,
+      cacheCreation5mTokens,
     });
   }
 
