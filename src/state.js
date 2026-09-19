@@ -121,8 +121,13 @@ export function clearState() {
 }
 
 // Composite key must mirror the server dedup key so a project rename or
-// uploadProject toggle changes the key and naturally forces a re-send
-// (server cleanup pass then reconciles the stale-named rows).
+// uploadProject toggle changes the key and naturally forces a re-send under
+// the new name. Nothing retires the row uploaded under the OLD key: ingest
+// only upserts on (user_id, source, model, project, hostname, bucket_start),
+// and there is no server-side reconciliation pass. The stale row survives
+// until `vibe-usage reset` or a one-off server-side cleanup, so a rename
+// double-counts tokens on the dashboard in the meantime. Verified against the
+// server 2026-09-19; weigh this before changing what a parser reports.
 export function bucketKey(b) {
   return `${b.source}|${b.model}|${b.project}|${b.hostname}|${b.bucketStart}`;
 }
