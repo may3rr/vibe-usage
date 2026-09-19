@@ -111,11 +111,11 @@ test('devin is registered and resolves env/XDG paths', () => {
   );
   assert.equal(
     resolveDevinDbPath({ XDG_DATA_HOME: '/tmp/xdg' }),
-    '/tmp/xdg/devin/cli/sessions.db',
+    join('/tmp/xdg', 'devin', 'cli', 'sessions.db'),
   );
   assert.equal(
     resolveDevinDbPath({}, '/home/u'),
-    '/home/u/.local/share/devin/cli/sessions.db',
+    join('/home/u', '.local', 'share', 'devin', 'cli', 'sessions.db'),
   );
 });
 
