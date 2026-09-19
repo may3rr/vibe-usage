@@ -1,7 +1,7 @@
 import { hostname as osHostname } from 'node:os';
 import { loadConfig, saveConfig } from './config.js';
 import {
-  loadState, saveState, pruneState,
+  loadState, saveState, pruneState, stateIdentity,
   bucketKey, bucketHash, sessionKey, sessionHash,
 } from './state.js';
 import { ingest, fetchSettings } from './api.js';
@@ -119,6 +119,13 @@ export async function runSync({
   // Resolve it before parsing or loading upload state so failure is a true
   // no-op: no data upload and no state mutation.
   const apiUrl = config.apiUrl || 'https://vibecafe.ai';
+  // state.json records what was already uploaded to *this* account on *this*
+  // server. Passing the identity into loadState() makes state left by a
+  // previous account fall away, so a re-bind re-uploads the local history
+  // instead of diffing it against uploads the new account never received.
+  // Built from the same `apiUrl` the ingest calls below use, so the recorded
+  // target and the actual target can never drift apart.
+  const identity = stateIdentity({ apiUrl, apiKey: config.apiKey });
   let uploadProject;
   try {
     const settings = await fetchSettings(apiUrl, config.apiKey);
@@ -223,11 +230,14 @@ export async function runSync({
     // Successful parsers emitted no live items. Prune their old keys even on
     // this fast path; otherwise deleting the final local log would leave dead
     // state entries forever. Failed-parser sources remain protected.
-    const state = loadState();
+    const state = loadState(identity);
+    if (state.identityChanged && !quiet) {
+      console.log(dim('检测到上传账号已更换，本次全量重传本地历史'));
+    }
     const before = Object.keys(state.buckets).length + Object.keys(state.sessions).length;
     pruneState(state, new Set(), new Set(), okSources);
     const pruned = before - (Object.keys(state.buckets).length + Object.keys(state.sessions).length);
-    if (pruned > 0) saveState(state);
+    if (pruned > 0) saveState(state, identity);
     if (!quiet && parserProgress.length > 0) {
       for (const p of parserProgress) {
         console.log(dim(`  ${p.source}: 正在建立本地索引 ${p.completed}/${p.total}（下次同步继续）`));
@@ -283,7 +293,10 @@ export async function runSync({
   // an active one sends just the current 30-min bucket.
   // Missing/corrupt state.json => empty maps => one-time full upload, then
   // incremental forever after.
-  const state = loadState();
+  const state = loadState(identity);
+  if (state.identityChanged && !quiet) {
+    console.log(dim('检测到上传账号已更换，本次全量重传本地历史'));
+  }
   const changedBuckets = [];
   const changedSessions = [];
   const liveBucketKeys = new Set();
@@ -321,7 +334,7 @@ export async function runSync({
   const before = Object.keys(state.buckets).length + Object.keys(state.sessions).length;
   pruneState(state, liveBucketKeys, liveSessionKeys, okSources);
   const pruned = before - (Object.keys(state.buckets).length + Object.keys(state.sessions).length);
-  if (pruned > 0) saveState(state);
+  if (pruned > 0) saveState(state, identity);
 
   if (changedBuckets.length === 0 && changedSessions.length === 0) {
     if (!quiet) console.log(dim('无新增数据。'));
@@ -422,7 +435,7 @@ export async function runSync({
           batchStateChanged = true;
         }
       }
-      if (batchStateChanged) saveState(state);
+      if (batchStateChanged) saveState(state, identity);
     }
 
     if (totalBatches > 1 || allBucketsToSend.length > 0) {

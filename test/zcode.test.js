@@ -24,10 +24,25 @@ function sql(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function fixtureDb(rows = '') {
+async function fixtureDb(rows = '') {
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-zcode-'));
   const path = join(root, 'db.sqlite');
-  execFileSync('sqlite3', [path, `${schema}${rows}`]);
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    // Node 20 exercises the sqlite3 CLI fallback used by queryDbJson().
+  }
+  if (DatabaseSync) {
+    const db = new DatabaseSync(path);
+    try {
+      db.exec(`${schema}${rows}`);
+    } finally {
+      db.close();
+    }
+  } else {
+    execFileSync('sqlite3', [path, `${schema}${rows}`]);
+  }
   return { root, path };
 }
 
@@ -63,7 +78,7 @@ test('zcode is registered and honors the fixture override', () => {
 });
 
 test('zcode reads the current and the legacy model key spelling', async () => {
-  const db = fixtureDb(`
+  const db = await fixtureDb(`
     INSERT INTO session VALUES ('s1','/work/demo');
     ${assistantRow('m1', 's1', 1781605706649, 'modelID', 'GLM-5.2')}
     ${assistantRow('m2', 's1', 1781605741898, 'modelId', 'GLM-5.3')}
@@ -86,7 +101,7 @@ test('zcode reads the current and the legacy model key spelling', async () => {
 });
 
 test('zcode still reports unknown for an assistant message without any model key', async () => {
-  const db = fixtureDb(`
+  const db = await fixtureDb(`
     INSERT INTO session VALUES ('s1','/work/demo');
     INSERT INTO message VALUES ('m1','s1',1781605706649,1781605706649,'{"role":"assistant","tokens":{"input":10,"output":5}}');
   `);

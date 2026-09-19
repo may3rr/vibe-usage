@@ -259,6 +259,10 @@ test('status separates "detected but never uploaded" from a syncing tool', () =>
   try {
     const result = runWithEnv(['status'], {
       HOME: home,
+      // os.homedir() ignores HOME on Windows and reads USERPROFILE instead;
+      // without this the child keeps resolving the real runner home and
+      // never sees the .kimi-code/.cola dirs written under `home` above.
+      USERPROFILE: home,
       XDG_DATA_HOME: join(home, 'data'),
       APPDATA: join(home, 'appdata'),
       VIBE_USAGE_CONFIG_DIR: configDir,

@@ -8,6 +8,8 @@ import { createHash, randomBytes } from 'node:crypto';
 // already uploaded successfully. Lets each sync skip re-sending unchanged
 // history: parsers stay stateless (still parse everything from disk every run),
 // but only new/changed items hit the network.
+// The file also records the upload target it belongs to (`identity`), so state
+// left by a previous account can never suppress that account's history.
 // VIBE_USAGE_STATE_DIR overrides the dir (test hook).
 const STATE_DIR = process.env.VIBE_USAGE_STATE_DIR?.trim() || join(homedir(), '.vibe-usage');
 const isDev = process.env.VIBE_USAGE_DEV === '1';
@@ -17,14 +19,57 @@ export function getStatePath() {
   return STATE_FILE;
 }
 
-export function loadState() {
+// The upload target this state belongs to: which server, and which account on
+// it. state.json only records what was already uploaded *to that target*, so
+// after a re-bind (`init` again, `config set apiKey`, or a desktop app
+// rewriting config.json) the old hashes must not make sync skip history the new
+// account has never received.
+//
+// The key is stored only as a fingerprint. The raw apiKey must never appear in
+// state.json — it is an ordinary-permission file next to the parser state, not
+// a credential store; config.json (mode 0600) remains the only place it lives.
+export function stateIdentity({ apiUrl, apiKey } = {}) {
+  return {
+    apiUrl: apiUrl || '',
+    keyFingerprint: apiKey
+      ? createHash('sha256').update(String(apiKey)).digest('hex').slice(0, 16)
+      : '',
+  };
+}
+
+function isIdentity(value) {
+  return !!value
+    && typeof value === 'object'
+    && typeof value.apiUrl === 'string'
+    && typeof value.keyFingerprint === 'string';
+}
+
+function sameIdentity(a, b) {
+  return a.apiUrl === b.apiUrl && a.keyFingerprint === b.keyFingerprint;
+}
+
+// `identity` is optional: callers that only read the recorded counts (e.g.
+// `status`) pass nothing and keep the pre-0.11.1 behaviour of taking the file
+// at face value.
+export function loadState(identity) {
   if (!existsSync(STATE_FILE)) return { buckets: {}, sessions: {} };
   try {
     const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
-    return {
-      buckets: parsed.buckets ?? {},
-      sessions: parsed.sessions ?? {},
-    };
+    const buckets = parsed.buckets ?? {};
+    const sessions = parsed.sessions ?? {};
+    if (!isIdentity(identity) || !isIdentity(parsed.identity)) {
+      // No identity recorded — written by a CLI older than 0.11.1. Adopt the
+      // entries as-is rather than forcing a re-upload: on upgrade day that
+      // would make every installed client re-send its whole history at once.
+      // The next saveState() stamps the current identity, so any later re-bind
+      // is caught.
+      return { buckets, sessions };
+    }
+    if (sameIdentity(parsed.identity, identity)) return { buckets, sessions };
+    // Bound to a different account or server: nothing recorded here was ever
+    // uploaded to the current target, so start empty and re-send local history.
+    // `identityChanged` is a runtime signal for the caller, never persisted.
+    return { buckets: {}, sessions: {}, identityChanged: true };
   } catch {
     // Corrupt/unreadable state must not lose data — treat as empty, which
     // triggers a one-time full re-upload (same as a fresh install).
@@ -32,14 +77,28 @@ export function loadState() {
   }
 }
 
-export function saveState(state) {
+export function saveState(state, identity) {
   mkdirSync(STATE_DIR, { recursive: true });
+  // Only the durable fields are written: `identityChanged` is loadState()'s
+  // one-run signal, not state. A CLI older than 0.11.1 reads just
+  // buckets/sessions, so the extra top-level `identity` key is ignored there —
+  // a file written by this version stays readable by older clients.
+  const payload = {
+    buckets: state.buckets ?? {},
+    sessions: state.sessions ?? {},
+  };
+  if (isIdentity(identity)) {
+    payload.identity = {
+      apiUrl: identity.apiUrl,
+      keyFingerprint: identity.keyFingerprint,
+    };
+  }
   // Atomic replace: write to a unique temp file then rename over the target.
   // A crash mid-write can no longer truncate state.json into an unreadable
   // file that loadState() would treat as empty (triggering a full re-upload).
   const tempPath = `${STATE_FILE}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
-    writeFileSync(tempPath, JSON.stringify(state) + '\n', 'utf-8');
+    writeFileSync(tempPath, JSON.stringify(payload) + '\n', 'utf-8');
     renameSync(tempPath, STATE_FILE);
   } finally {
     // No-op after a successful rename (the temp file is already gone); cleans

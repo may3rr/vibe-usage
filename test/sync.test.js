@@ -385,6 +385,113 @@ test('a successful batch is persisted before a later batch fails', async () => {
   }
 });
 
+// Re-binding the CLI to another account (init again, `config set apiKey`, or a
+// desktop app rewriting config.json) used to be invisible to state.json: the
+// incremental diff matched every bucket the *previous* account had uploaded and
+// sent nothing, so the new account received no history while sync still printed
+// success. The state must be scoped to its upload target.
+test('a changed API key re-uploads the whole local history exactly once', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-rebind-'));
+  const configDir = join(root, 'config');
+  const stateDir = join(root, 'state');
+  const homeDir = join(root, 'home');
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+
+  const received = [];
+  try {
+    await withServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/api/usage/settings') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ uploadProject: true }));
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/api/usage/ingest') {
+        const chunks = [];
+        req.on('data', chunk => chunks.push(chunk));
+        req.on('end', () => {
+          const body = req.headers['content-encoding'] === 'gzip'
+            ? gunzipSync(Buffer.concat(chunks))
+            : Buffer.concat(chunks);
+          const payload = JSON.parse(body.toString('utf8'));
+          received.push(payload.buckets.length);
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            ingested: payload.buckets.length,
+            sessions: payload.sessions?.length || 0,
+          }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    }, async apiUrl => {
+      const writeKey = (apiKey) => writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+        apiKey,
+        apiUrl,
+        hostname: 'rebind-test',
+      }));
+      const env = {
+        ...process.env,
+        HOME: homeDir,
+        VIBE_USAGE_DEV: '0',
+        VIBE_USAGE_CONFIG_DIR: configDir,
+        VIBE_USAGE_STATE_DIR: stateDir,
+      };
+      const command = `
+        import { parsers } from './src/parsers/index.js';
+        for (const source of Object.keys(parsers)) delete parsers[source];
+        parsers['rebind-test'] = async () => ({
+          buckets: Array.from({ length: 3 }, (_, index) => ({
+            source: 'rebind-test',
+            model: 'model-' + index,
+            project: 'project',
+            bucketStart: '2026-09-18T00:00:00.000Z',
+            inputTokens: index + 1,
+            outputTokens: 0,
+            cachedInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: index + 1,
+          })),
+          sessions: [],
+        });
+        const { runSync } = await import('./src/sync.js');
+        await runSync({ throws: true });
+      `;
+      const sync = () => execFileAsync(process.execPath, ['--input-type=module', '-e', command], {
+        cwd: process.cwd(), env,
+      });
+
+      // First account: full upload, state records the target.
+      writeKey('vbu_account_a');
+      const first = await sync();
+      assert.doesNotMatch(first.stdout, /检测到上传账号已更换/);
+      const firstState = JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf8'));
+      assert.equal(Object.keys(firstState.buckets).length, 3);
+      assert.equal(firstState.identity.apiUrl, apiUrl);
+      assert.equal(firstState.identity.keyFingerprint.length, 16);
+      assert.equal(readFileSync(join(stateDir, 'state.json'), 'utf8').includes('vbu_account_a'), false);
+
+      // Re-bind: the same local history must reach the new account in full.
+      writeKey('vbu_account_b');
+      const second = await sync();
+      assert.match(second.stdout, /检测到上传账号已更换，本次全量重传本地历史/);
+      const secondState = JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf8'));
+      assert.equal(Object.keys(secondState.buckets).length, 3);
+      assert.notEqual(secondState.identity.keyFingerprint, firstState.identity.keyFingerprint);
+
+      // Steady state on the new account: nothing left to send.
+      const third = await sync();
+      assert.doesNotMatch(third.stdout, /检测到上传账号已更换/);
+      assert.match(third.stdout, /无新增数据。/);
+    });
+
+    // 3 buckets for the first account, 3 again for the second, none for the third run.
+    assert.deepEqual(received, [3, 3]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // Buckets AND sessions of a source the backend soft-drops must both stay
 // uncommitted, so the first sync after the server registers that source
 // re-sends them instead of losing them permanently.
