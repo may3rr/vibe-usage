@@ -64,7 +64,7 @@ async function fixture(run) {
 test('codebuddy is registered and honors CODEBUDDY_CONFIG_DIR / the fixture override', () => {
   assert.equal(typeof parsers.codebuddy, 'function');
   assert.equal(TOOLS.find(tool => tool.id === 'codebuddy')?.name, 'CodeBuddy');
-  assert.deepEqual(resolveCodebuddyRoots({ VIBE_USAGE_CODEBUDDY_DIRS: '/a:/b' }), ['/a', '/b']);
+  assert.deepEqual(resolveCodebuddyRoots({ VIBE_USAGE_CODEBUDDY_DIRS: `/a${delimiter}/b` }), ['/a', '/b']);
   assert.deepEqual(resolveCodebuddyRoots({ CODEBUDDY_CONFIG_DIR: '/custom/.codebuddy' }), ['/custom/.codebuddy']);
   assert.deepEqual(resolveCodebuddyRoots({}, '/home/me'), [join('/home/me', '.codebuddy')]);
   assert.deepEqual(resolveCodebuddyRoots({ VIBE_USAGE_CODEBUDDY_DIRS: `/x${delimiter}/y` }), ['/x', '/y']);

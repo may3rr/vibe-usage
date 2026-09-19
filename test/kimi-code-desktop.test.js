@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { kimiWorkCodeHome, resolveKimiCodeRoots } from '../src/kimi-roots.js';
 
 const start = Date.parse('2026-09-08T08:01:00.000Z');
@@ -52,18 +52,23 @@ test('Kimi Work home is resolved per platform', () => {
 });
 
 test('CLI home stays primary and the desktop home is additive, without duplicates', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-roots-'));
-  const fakeHome = join(root, 'home');
-  const cliHome = join(root, 'cli-home');
+  // Forcing platform: 'linux' below exercises the posix branch regardless of
+  // host OS, so every path fed into or compared against it must be built with
+  // `posix.join` too — mixing in the native `join` (backslash on Windows)
+  // would make otherwise-identical directories compare as different strings,
+  // even though Windows' filesystem APIs happily accept forward slashes.
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-roots-')).replaceAll('\\', '/');
+  const fakeHome = posix.join(root, 'home');
+  const cliHome = posix.join(root, 'cli-home');
   mkdirSync(cliHome, { recursive: true });
   // Same store reachable under the desktop home path: scan it once, not twice.
-  mkdirSync(join(fakeHome, '.config', 'kimi-desktop', 'daimon-share', 'daimon', 'runtime', 'kimi-code'), { recursive: true });
+  mkdirSync(posix.join(fakeHome, '.config', 'kimi-desktop', 'daimon-share', 'daimon', 'runtime', 'kimi-code'), { recursive: true });
   symlinkSync(cliHome, kimiWorkCodeHome({}, 'linux', fakeHome));
   try {
     assert.deepEqual(resolveKimiCodeRoots({ KIMI_CODE_HOME: cliHome }, 'linux', fakeHome), [cliHome]);
     assert.deepEqual(
       resolveKimiCodeRoots({}, 'linux', fakeHome),
-      [join(fakeHome, '.kimi-code'), kimiWorkCodeHome({}, 'linux', fakeHome)],
+      [posix.join(fakeHome, '.kimi-code'), kimiWorkCodeHome({}, 'linux', fakeHome)],
     );
     // Fixture hook replaces discovery entirely — the machine's real stores stay out.
     assert.deepEqual(
@@ -77,7 +82,10 @@ test('Kimi Work desktop sessions are parsed and merged with the CLI home', () =>
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-desktop-'));
   const fakeHome = join(root, 'home');
   const cliHome = join(root, 'cli-home');
-  const env = { ...process.env, HOME: fakeHome, KIMI_CODE_HOME: cliHome };
+  // os.homedir() ignores HOME on Windows and reads USERPROFILE instead; set
+  // both so the child (which calls homedir() with no args) resolves fakeHome
+  // on every platform instead of falling back to the real runner home.
+  const env = { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome, KIMI_CODE_HOME: cliHome };
   delete env.VIBE_USAGE_KIMI_CODE_DIR;
   // Keep the fixture hermetic: an ambient XDG_CONFIG_HOME / APPDATA on the
   // runner would move the desktop home out from under it, and the child would

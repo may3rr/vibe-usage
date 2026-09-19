@@ -6,12 +6,31 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse } from '../src/parsers/dimagent.js';
 
+async function runSql(dbPath, sqlText) {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    // Node 20 exercises the sqlite3 CLI fallback used by queryDbJson().
+  }
+  if (DatabaseSync) {
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec(sqlText);
+    } finally {
+      db.close();
+    }
+    return;
+  }
+  execFileSync('sqlite3', [dbPath, sqlText]);
+}
+
 test('parse reads DimAgent SQLite usage and excludes forked copies', async () => {
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-dimagent-test-'));
   const dbPath = join(root, 'dimcode.sqlite');
   const previousDbPath = process.env.VIBE_USAGE_DIMAGENT_DB;
 
-  execFileSync('sqlite3', [dbPath, `
+  await runSql(dbPath, `
     CREATE TABLE sessions (
       sessionId TEXT PRIMARY KEY,
       cwd TEXT NOT NULL
@@ -73,7 +92,7 @@ test('parse reads DimAgent SQLite usage and excludes forked copies', async () =>
       ('msg_fork_1_assistant', 'fork', 'assistant', '2026-07-01T00:00:10.000Z'),
       ('fork-user', 'fork', 'user', '2026-07-01T00:06:00.000Z'),
       ('fork-assistant', 'fork', 'assistant', '2026-07-01T00:06:04.000Z');
-  `]);
+  `);
 
   process.env.VIBE_USAGE_DIMAGENT_DB = dbPath;
   try {

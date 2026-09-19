@@ -12,10 +12,25 @@ function sql(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function fixtureDb(schema, rows = '') {
+async function fixtureDb(schema, rows = '') {
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-mcode-'));
   const path = join(root, 'runtime-state.sqlite');
-  execFileSync('sqlite3', [path, `${schema}${rows}`]);
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    // Node 20 exercises the sqlite3 CLI fallback used by queryDbJson().
+  }
+  if (DatabaseSync) {
+    const db = new DatabaseSync(path);
+    try {
+      db.exec(`${schema}${rows}`);
+    } finally {
+      db.close();
+    }
+  } else {
+    execFileSync('sqlite3', [path, `${schema}${rows}`]);
+  }
   return { root, path };
 }
 
@@ -57,7 +72,7 @@ test('mcode is registered and discovers env overrides', () => {
 });
 
 test('mcode aggregates milliseconds, basename, cache and separate reasoning', async () => {
-  const db = fixtureDb(schema, `
+  const db = await fixtureDb(schema, `
     INSERT INTO local_runtime_sessions VALUES ('s1','/tmp/s1/workspace','/fixtures/project-a');
     INSERT INTO local_runtime_sessions VALUES ('s2',NULL,NULL);
     ${token('s1', 1787935277463, 10, 9, 3, 4, 5)}
@@ -80,7 +95,7 @@ test('mcode aggregates milliseconds, basename, cache and separate reasoning', as
 });
 
 test('mcode clamps malformed negative/reasoning values and handles seconds', async () => {
-  const db = fixtureDb(schema, `
+  const db = await fixtureDb(schema, `
     INSERT INTO local_runtime_sessions VALUES ('s1','/tmp/project-b/',NULL);
     ${token('s1', 1787935200, -3, 2, 9, 'bad', 1)}
   `);
@@ -98,7 +113,7 @@ test('mcode clamps malformed negative/reasoning values and handles seconds', asy
 test('mcode returns skipped for missing or incompatible databases', async () => {
   const missing = await withDb('/tmp/does-not-exist-mcode.sqlite', parse);
   assert.deepEqual(missing, { buckets: [], sessions: [] });
-  const db = fixtureDb(`CREATE TABLE local_runtime_token_usage (session_id TEXT);`);
+  const db = await fixtureDb(`CREATE TABLE local_runtime_token_usage (session_id TEXT);`);
   try {
     const result = await withDb(db.path, parse);
     assert.equal(result.skipped, true);
