@@ -121,6 +121,10 @@ test('Droid keeps Factory sidecar inputTokens as uncached input', async () => wi
   assert.equal(bucket.totalTokens, 1059);
   assert.equal(result.sessions.length, 1);
   assert.equal(result.sessions[0].userMessageCount, 1);
+  // 这份 fixture 埋了提示词文本，解析器只应产出计量与时序字段。
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes('DO NOT UPLOAD'), false);
+  assert.equal(serialized.includes('VIBE-REPRO-OK'), false);
 }));
 
 test('Droid catalog maps a slot id whose slug is not the API model', async () => withDroidSessions(async (root) => {
