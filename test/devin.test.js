@@ -13,10 +13,25 @@ function sql(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function fixtureDb(schema, rows = '') {
+async function fixtureDb(schema, rows = '') {
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-devin-'));
   const path = join(root, 'sessions.db');
-  execFileSync('sqlite3', [path, `${schema}${rows}`]);
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    // Node 20 exercises the sqlite3 CLI fallback used by queryDbJson().
+  }
+  if (DatabaseSync) {
+    const db = new DatabaseSync(path);
+    try {
+      db.exec(`${schema}${rows}`);
+    } finally {
+      db.close();
+    }
+  } else {
+    execFileSync('sqlite3', [path, `${schema}${rows}`]);
+  }
   return { root, path };
 }
 
@@ -105,7 +120,7 @@ test('devin is registered and resolves env/XDG paths', () => {
 });
 
 test('devin aggregates metrics with cache creation folded into input', async () => {
-  const db = fixtureDb(schema, `
+  const db = await fixtureDb(schema, `
     ${insertSession('s1', '/Users/x/Coding/proj-a')}
     ${msg('s1', 1, 'user', 1789525600, { isUserInput: 1, iso: '2026-09-16T02:27:00.000Z' })}
     ${msg('s1', 2, 'assistant', 1789525640, {
@@ -144,7 +159,7 @@ test('devin deduplicates forest-copied message nodes by message_id', async () =>
     iso: '2026-09-16T02:27:20.000Z',
     metrics: metrics(10, 20, 30, 40),
   };
-  const db = fixtureDb(schema, `
+  const db = await fixtureDb(schema, `
     ${insertSession('s1', '/p/proj')}
     ${msg('s1', 1, 'user', 1789525600, { isUserInput: 1, iso: '2026-09-16T02:26:00.000Z' })}
     ${msg('s1', 2, 'assistant', 1789525640, shared)}
@@ -164,7 +179,7 @@ test('devin deduplicates forest-copied message nodes by message_id', async () =>
 });
 
 test('devin splits models per message and falls back to the session model', async () => {
-  const db = fixtureDb(schema, `
+  const db = await fixtureDb(schema, `
     ${insertSession('s1', '/p/proj', 'swe-2-high')}
     ${msg('s1', 1, 'user', 1789525600, { isUserInput: 1, iso: '2026-09-16T02:27:00.000Z' })}
     ${msg('s1', 2, 'assistant', 1789525640, {
@@ -186,7 +201,7 @@ test('devin splits models per message and falls back to the session model', asyn
 });
 
 test('devin counts only is_user_input prompts and skips system/keepalive rows', async () => {
-  const db = fixtureDb(schema, `
+  const db = await fixtureDb(schema, `
     ${insertSession('s1', '/p/proj')}
     ${msg('s1', 1, 'system', 1789525500, { iso: '2026-09-16T02:25:00.000Z' })}
     ${msg('s1', 2, 'user', 1789525600, { isUserInput: 1, iso: '2026-09-16T02:26:40.000Z' })}
@@ -224,7 +239,7 @@ test('devin counts only is_user_input prompts and skips system/keepalive rows', 
 });
 
 test('devin falls back to node created_at seconds when ISO is missing', async () => {
-  const db = fixtureDb(schema, `
+  const db = await fixtureDb(schema, `
     ${insertSession('s1', '/p/proj')}
     ${msg('s1', 1, 'user', 1789525600, { isUserInput: 1 })}
     ${msg('s1', 2, 'assistant', 1789525640, { metrics: metrics(1, 1, 0, 0) })}
@@ -244,7 +259,7 @@ test('devin falls back to node created_at seconds when ISO is missing', async ()
 test('devin returns skipped for missing or incompatible databases', async () => {
   const missing = await withDb('/tmp/does-not-exist-devin.db', parse);
   assert.deepEqual(missing, { buckets: [], sessions: [] });
-  const db = fixtureDb(`CREATE TABLE message_nodes (session_id TEXT);`);
+  const db = await fixtureDb(`CREATE TABLE message_nodes (session_id TEXT);`);
   try {
     const result = await withDb(db.path, parse);
     assert.equal(result.skipped, true);
