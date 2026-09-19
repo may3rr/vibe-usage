@@ -12,6 +12,7 @@ import {
   grokSessionsDir,
 } from './extra-roots.js';
 import { findClineDataDirs } from './cline-roots.js';
+import { findCodeartsAgentDbs, resolveCodeartsAgentRoots } from './codearts-roots.js';
 import { findColaDataDirs, getColaSessionsDir } from './cola-roots.js';
 import { findCraftDataDirs } from './craft-roots.js';
 import { findHermesDataDirs, getHermesHome } from './hermes-roots.js';
@@ -278,6 +279,12 @@ export const TOOLS = [
     id: 'claude-code',
     dataDir: join(homedir(), '.claude', 'projects'),
     detectDataDirs: ({ extraRoots } = {}) => findClaudeCodeDataDirs(extraRootList(extraRoots?.['claude-code'])),
+  },
+  {
+    name: 'CodeArts Agent',
+    id: 'codearts-agent',
+    dataDir: resolveCodeartsAgentRoots()[0],
+    detectDataDirs: () => findCodeartsAgentDbs(),
   },
   {
     name: 'Codex CLI',
