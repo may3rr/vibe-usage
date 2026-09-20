@@ -203,3 +203,20 @@ test('Cursor still surfaces expired credentials and soft-skips server failures',
     });
   }
 });
+
+test('Cursor skips a renamed export header instead of uploading an empty snapshot', async (t) => {
+  await withCursorDb(t);
+  // Cursor renaming a column used to degrade into "zero tokens everywhere" —
+  // an empty upload that also pruned the incremental state. The header check
+  // must turn that into a skipped run with a warning.
+  t.mock.method(globalThis, 'fetch', async () => new Response([
+    'Date,Model,Kind,Input Tokens,Output',
+    '2026-09-07T01:02:00Z,test-model,Included,10,20',
+  ].join('\n')));
+
+  const result = await cursor.parse();
+  assert.equal(result.skipped, true);
+  assert.deepEqual(result.buckets, []);
+  assert.deepEqual(result.sessions, []);
+  assert.match(result.warnings[0], /导出表头与预期不符/);
+});

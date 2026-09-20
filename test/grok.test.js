@@ -268,3 +268,146 @@ test('parse failure inside a configured Grok home skips the source', async () =>
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('parse reads the Grok 1.0 usage.json ledger when updates carry no usage', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-grok-ledger-'));
+  const sessionsDir = join(root, 'sessions');
+  const group = encodeURIComponent('/Users/demo/Projects/my-app');
+  const sessionId = '019fb111-0000-7000-8000-000000000001';
+  const sessionPath = join(sessionsDir, group, sessionId);
+  mkdirSync(sessionPath, { recursive: true });
+
+  writeFileSync(join(sessionPath, 'summary.json'), JSON.stringify({
+    info: { id: sessionId, cwd: '/Users/demo/Projects/my-app' },
+    created_at: '2026-09-20T02:16:15.000Z',
+    updated_at: '2026-09-20T02:20:00.000Z',
+    current_model_id: 'grok-4.6',
+  }));
+
+  // 1.x builds keep token accounting out of the ACP stream: turn_completed
+  // carries no usage, the totals live in usage.json (what `grok usage` reads).
+  writeFileSync(join(sessionPath, 'updates.jsonl'), [
+    JSON.stringify({ timestamp: 1790000000, params: { update: { sessionUpdate: 'user_message_chunk' } } }),
+    JSON.stringify({ timestamp: 1790000010, params: { update: { sessionUpdate: 'turn_completed', stop_reason: 'end_turn' } } }),
+    JSON.stringify({ timestamp: 1790001900, params: { update: { sessionUpdate: 'user_message_chunk' } } }),
+    JSON.stringify({ timestamp: 1790002000, params: { update: { sessionUpdate: 'turn_completed', stop_reason: 'end_turn' } } }),
+  ].join('\n') + '\n');
+
+  writeFileSync(join(sessionPath, 'usage.json'), JSON.stringify({
+    session: { inputTokens: 1100, outputTokens: 250, cachedReadTokens: 720, cacheCreationTokens: 50, reasoningTokens: 43, totalTokens: 1350, modelCalls: 4 },
+    turns: [
+      { turnNumber: 1, inputTokens: 1000, outputTokens: 200, cachedReadTokens: 700, cacheCreationTokens: 50, reasoningTokens: 33, totalTokens: 1200, modelCalls: 2, costUsdTicks: 100,
+        modelUsage: { 'grok-4.6-build': { inputTokens: 1000, outputTokens: 200, cachedReadTokens: 700, cacheCreationTokens: 50, reasoningTokens: 33, modelCalls: 2 } } },
+      { turnNumber: 2, inputTokens: 100, outputTokens: 50, cachedReadTokens: 20, cacheCreationTokens: 0, reasoningTokens: 10, totalTokens: 150, modelCalls: 2, costUsdTicks: 5 },
+    ],
+  }));
+
+  const prev = process.env.VIBE_USAGE_GROK_SESSIONS;
+  process.env.VIBE_USAGE_GROK_SESSIONS = sessionsDir;
+  try {
+    const result = await parse();
+    const buckets = result.buckets.filter((b) => b.source === 'grok');
+    assert.ok(buckets.length >= 1);
+
+    const sum = (key) => buckets.reduce((a, b) => a + (b[key] || 0), 0);
+    // input = (1000 + 50 cache write) - 700 cache read + 100 - 20
+    assert.equal(sum('inputTokens'), 350 + 80);
+    assert.equal(sum('outputTokens'), 167 + 40);
+    assert.equal(sum('cachedInputTokens'), 700 + 20);
+    assert.equal(sum('reasoningOutputTokens'), 33 + 10);
+    // A turn that carries modelUsage is attributed to the model it names; a
+    // turn without one falls back to the summary's current_model_id.
+    const models = new Set(buckets.map((b) => b.model));
+    assert.ok(models.has('grok-4.6-build'));
+    assert.ok(models.has('grok-4.6'));
+    // both turns are attributed to their own turn_completed timestamps
+    assert.equal(new Set(buckets.map((b) => b.bucketStart)).size, 2);
+  } finally {
+    if (prev !== undefined) process.env.VIBE_USAGE_GROK_SESSIONS = prev;
+    else delete process.env.VIBE_USAGE_GROK_SESSIONS;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('usage.json is ignored when updates.jsonl already carries turn usage', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-grok-ledger-both-'));
+  const sessionsDir = join(root, 'sessions');
+  const group = encodeURIComponent('/Users/demo/Projects/my-app');
+  const sessionId = '019fb111-0000-7000-8000-000000000002';
+  const sessionPath = join(sessionsDir, group, sessionId);
+  mkdirSync(sessionPath, { recursive: true });
+
+  writeFileSync(join(sessionPath, 'summary.json'), JSON.stringify({
+    info: { id: sessionId, cwd: '/Users/demo/Projects/my-app' },
+    created_at: '2026-09-20T02:16:15.000Z',
+    updated_at: '2026-09-20T02:20:00.000Z',
+    current_model_id: 'grok-4.6',
+  }));
+
+  writeFileSync(join(sessionPath, 'updates.jsonl'), [
+    JSON.stringify({ timestamp: 1790000010, params: { update: { sessionUpdate: 'turn_completed', usage: {
+      inputTokens: 100, outputTokens: 50, cachedReadTokens: 20, reasoningTokens: 10,
+    } } } }),
+  ].join('\n') + '\n');
+
+  // Same turn present in both places: the ACP copy is authoritative (it has the
+  // timestamp and model), so the ledger must not add a second entry.
+  writeFileSync(join(sessionPath, 'usage.json'), JSON.stringify({
+    turns: [{ turnNumber: 1, inputTokens: 100, outputTokens: 50, cachedReadTokens: 20, cacheCreationTokens: 0, reasoningTokens: 10, modelCalls: 1 }],
+  }));
+
+  const prev = process.env.VIBE_USAGE_GROK_SESSIONS;
+  process.env.VIBE_USAGE_GROK_SESSIONS = sessionsDir;
+  try {
+    const result = await parse();
+    const buckets = result.buckets.filter((b) => b.source === 'grok');
+    const sum = (key) => buckets.reduce((a, b) => a + (b[key] || 0), 0);
+    assert.equal(sum('inputTokens'), 80);
+    assert.equal(sum('outputTokens'), 40);
+    assert.equal(sum('cachedInputTokens'), 20);
+    assert.equal(sum('reasoningOutputTokens'), 10);
+  } finally {
+    if (prev !== undefined) process.env.VIBE_USAGE_GROK_SESSIONS = prev;
+    else delete process.env.VIBE_USAGE_GROK_SESSIONS;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('parse warns when a session reports turns but no usage can be read', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-grok-canary-'));
+  const sessionsDir = join(root, 'sessions');
+  const group = encodeURIComponent('/Users/demo/Projects/my-app');
+  const sessionId = '019fb111-0000-7000-8000-000000000003';
+  const sessionPath = join(sessionsDir, group, sessionId);
+  mkdirSync(sessionPath, { recursive: true });
+
+  writeFileSync(join(sessionPath, 'summary.json'), JSON.stringify({
+    info: { id: sessionId, cwd: '/Users/demo/Projects/my-app' },
+    created_at: '2026-09-20T02:16:15.000Z',
+    updated_at: '2026-09-20T02:20:00.000Z',
+    current_model_id: 'grok-4.6',
+  }));
+  // Turn finished, but neither the ACP stream nor a usage.json ledger carries
+  // the numbers — the shape of the next format move.
+  writeFileSync(join(sessionPath, 'updates.jsonl'), [
+    JSON.stringify({ timestamp: 1790000010, params: { update: { sessionUpdate: 'turn_completed', stop_reason: 'end_turn' } } }),
+  ].join('\n') + '\n');
+  writeFileSync(join(sessionPath, 'signals.json'), JSON.stringify({
+    turnCount: 2,
+    modelsUsed: ['grok-4.6'],
+    primaryModelId: 'grok-4.6',
+  }));
+
+  const prev = process.env.VIBE_USAGE_GROK_SESSIONS;
+  process.env.VIBE_USAGE_GROK_SESSIONS = sessionsDir;
+  try {
+    const result = await parse();
+    assert.deepEqual(result.buckets, []);
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /有已完成轮次但未读到用量/);
+  } finally {
+    if (prev !== undefined) process.env.VIBE_USAGE_GROK_SESSIONS = prev;
+    else delete process.env.VIBE_USAGE_GROK_SESSIONS;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

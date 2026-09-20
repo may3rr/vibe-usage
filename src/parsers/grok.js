@@ -148,6 +148,62 @@ async function forEachJsonlLine(filePath, onLine, strict = false) {
   }
 }
 
+/**
+ * Grok 1.0 moved per-turn token accounting out of the ACP stream into a
+ * dedicated `<session>/usage.json` ledger — `grok usage <session-id>` is its
+ * documented reader, and the sessions guide says to use that "instead of
+ * reading session files". Older builds (0.2.x) wrote the same numbers into
+ * `updates.jsonl` `turn_completed.usage`; those sessions have no usage.json.
+ *
+ * The ledger holds token totals per turn but neither timestamps nor a model
+ * id, so callers pair its turns with the session's `turn_completed` events by
+ * order and fall back to the summary's model.
+ */
+function readUsageLedger(sessionPath, strict = false) {
+  const ledgerPath = join(sessionPath, 'usage.json');
+  if (!existsSync(ledgerPath)) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8'));
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const turns = Array.isArray(parsed.turns) ? parsed.turns : [];
+  const session = parsed.session && typeof parsed.session === 'object' ? parsed.session : null;
+  if (turns.length === 0 && !session) return null;
+  return { session, turns };
+}
+
+/** Map one ledger record (turn or session totals) onto the usage shape the
+ *  ACP stream uses. Cache writes are folded into input — Grok publishes no
+ *  separate cache-write rate and pre-1.0 those tokens were part of
+ *  `inputTokens`, so folding keeps cross-version totals identical and leaves
+ *  the Anthropic-only cache-creation columns untouched. Any per-model
+ *  `modelUsage` map is carried through (and folded the same way) so the
+ *  caller's model attribution works exactly like the ACP path. */
+function ledgerRecordUsage(record) {
+  if (!record || typeof record !== 'object') return null;
+  const fold = (entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const input = Math.max(0, Number(entry.inputTokens) || 0);
+    const cacheCreation = Math.max(0, Number(entry.cacheCreationTokens) || 0);
+    return { ...entry, inputTokens: input + cacheCreation };
+  };
+  const folded = fold(record);
+  const modelUsage = record.modelUsage && typeof record.modelUsage === 'object'
+    ? Object.fromEntries(Object.entries(record.modelUsage).map(([model, entry]) => [model, fold(entry)]))
+    : null;
+  const usage = { ...folded, ...(modelUsage ? { modelUsage } : {}) };
+  const total =
+    Number(usage.inputTokens || 0) +
+    Number(usage.cachedReadTokens || 0) +
+    Number(usage.outputTokens || 0) +
+    Number(usage.reasoningTokens || 0);
+  return total > 0 ? usage : null;
+}
+
 function listSessionDirs(sessionsDir, strict = false) {
   const results = [];
   if (!existsSync(sessionsDir)) {
@@ -231,6 +287,7 @@ export async function parse({ extraRoots = [] } = {}) {
 
   const entries = [];
   const sessionEvents = [];
+  const unreadSessions = [];
 
   const candidates = [];
   for (const sessionsDir of roots) {
@@ -287,9 +344,14 @@ export async function parse({ extraRoots = [] } = {}) {
       const cwd = summary.info?.cwd || summary.git_root_dir || null;
       const project = cwd ? projectFromPath(cwd) : projectFallback;
       const fallbackModel = summary.current_model_id || 'unknown';
+      const sessionEntryStart = entries.length;
 
       // Prefer updates.jsonl turn_completed for exact usage + message timings.
+      // `turnTimestamps` keeps their order so a 1.x usage.json ledger (which
+      // has no timestamps of its own) can be paired turn-by-turn below.
       let sawUserOrAssistant = false;
+      let usageFromUpdates = 0;
+      const turnTimestamps = [];
       await forEachJsonlLine(join(sessionPath, 'updates.jsonl'), (obj) => {
         const update = obj?.params?.update;
         if (!update || typeof update !== 'object') return;
@@ -298,12 +360,15 @@ export async function parse({ extraRoots = [] } = {}) {
         const timestamp = toDate(obj.timestamp);
 
         if (kind === 'turn_completed' && timestamp) {
+          turnTimestamps.push(timestamp);
+          const before = entries.length;
           emitTurnUsage(entries, {
             usage: update.usage,
             project,
             timestamp,
             fallbackModel,
           });
+          if (entries.length > before) usageFromUpdates += 1;
         }
 
         if (!timestamp) return;
@@ -328,6 +393,37 @@ export async function parse({ extraRoots = [] } = {}) {
           });
         }
       }, strict);
+
+      // 1.x sessions keep per-turn totals in usage.json instead of the ACP
+      // stream. Consulted only when updates.jsonl yielded no usage, so a
+      // session that carries both is never counted twice.
+      if (usageFromUpdates === 0) {
+        const ledger = readUsageLedger(sessionPath, strict);
+        const records = ledger?.turns?.length ? ledger.turns : (ledger?.session ? [ledger.session] : []);
+        if (records.length > 0) {
+          const sessionTimestamp = toDate(summary.updated_at || summary.last_active_at || summary.created_at);
+          for (const [index, record] of records.entries()) {
+            const usage = ledgerRecordUsage(record);
+            if (!usage) continue;
+            const timestamp = turnTimestamps[index] || sessionTimestamp;
+            if (!timestamp) continue;
+            emitTurnUsage(entries, { usage, project, timestamp, fallbackModel });
+          }
+        }
+      }
+
+      // Canary for the next on-disk format move: a session whose signals.json
+      // reports completed turns (and a model) but whose usage we could not read
+      // from either source is a silent collection gap, not an idle session —
+      // 1.0 moved the ledger to usage.json exactly like this.
+      if (entries.length === sessionEntryStart) {
+        const signals = readJsonSafe(join(sessionPath, 'signals.json'));
+        const turnCount = Number(signals?.turnCount) || 0;
+        const modelsUsed = Array.isArray(signals?.modelsUsed) ? signals.modelsUsed.filter(Boolean) : [];
+        if (turnCount > 0 && modelsUsed.length > 0) {
+          unreadSessions.push({ sessionId, turnCount });
+        }
+      }
 
       // Fallback timing from events.jsonl when updates lack message chunks
       // (short/aborted sessions, older builds).
@@ -391,5 +487,11 @@ export async function parse({ extraRoots = [] } = {}) {
   return {
     buckets: aggregateToBuckets(entries),
     sessions: extractSessions(sessionEvents),
+    ...(unreadSessions.length > 0 && {
+      warnings: [
+        `grok: ${unreadSessions.length} 个会话有已完成轮次但未读到用量（例如 ${unreadSessions[0].sessionId}，${unreadSessions[0].turnCount} 轮），` +
+        '可能是 Grok 又更改了用量落盘格式，请反馈；本次未上传这些会话的用量。',
+      ],
+    }),
   };
 }

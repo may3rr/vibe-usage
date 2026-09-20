@@ -21,7 +21,7 @@ vibe-usage/
 │   │   ├── codex-segments.js  # Same-session continuation merge; exact cross-file copy suppression
 │   │   ├── codex-cache.js     # Versioned, disposable per-rollout Codex parser cache
 │   │   ├── cola.js            # Cola Pi-compatible sessions; copied headers retain record identities
-│   │   ├── grok.js            # ~/.grok/sessions updates.jsonl turn_completed usage
+│   │   ├── grok.js            # ~/.grok/sessions: updates.jsonl turn_completed usage, else usage.json ledger
 │   │   ├── copilot-cli.js
 │   │   ├── sqlite.js          # queryDbJson() — node:sqlite (Node ≥22.5), falls back to sqlite3 CLI
 │   │   ├── cursor.js          # SQLite (read auth token) + cursor.com CSV export
@@ -282,6 +282,12 @@ Network-fetch parsers (the Cursor exception):
 - Always wrap network calls with `AbortSignal.timeout(...)` so a single hung host can't stall the whole sync (sync.js catches throws per-parser but cannot interrupt a hanging await).
 - Size that timeout for the **slowest account**, not the median one. cursor.com computes the export over the whole account, so its latency scales with the user's usage: a too-short default does not fail intermittently, it locks heavy users out of every single sync. 10s (v0.7.11) and 30s (#72) both did this; the default is now 120s, overridable via `VIBE_USAGE_CURSOR_FETCH_TIMEOUT_MS`.
 - Mark transient/network errors with `err.skip = true` and return `{ buckets: [], sessions: [], skipped: true }` so the parser stays quiet without letting `sync.js` prune that source's incremental state. Only auth/permanent errors should bubble up.
+- **Treat the export's header as an external contract.** Require `Date`, `Model` and at least one token column; on a mismatch return `skipped: true` with a warning naming the observed header. Without this check a renamed column parsed every row as zero tokens, produced an empty upload, and let `sync.js` prune Cursor's state as if the account had gone quiet (silent, months-long). Same fail-closed rule as the network path.
+
+Grok local-session parser (`grok.js`):
+- Usage comes from `updates.jsonl` `turn_completed.usage` (0.2.x) **or** the per-session `usage.json` ledger (1.0+; `grok usage` is its documented reader and the guide says to use it "instead of reading session files"). Read the ledger only when the ACP stream yielded no usage for that session, so a session carrying both is never counted twice.
+- The ledger carries token totals per turn but no timestamps or model id: pair turns with the session's `turn_completed` events in order, fall back to the summary's `current_model_id`, and fold `cacheCreationTokens` into input (Grok publishes no separate cache-write rate, and pre-1.0 those tokens were part of `inputTokens`).
+- Canary: when `signals.json` reports `turnCount > 0` with `modelsUsed` but the session yielded no usage at all, emit a warning. That is exactly how the 1.0 ledger move presented itself — a silent empty collection, not an idle session.
 
 WorkBuddy JSONL parser (`workbuddy.js`):
 - Stream each JSONL file only to its captured size; never retain or upload message content.
@@ -352,7 +358,7 @@ Extra-root regression coverage:
 |---|---|
 | `test/cli.test.js` | Config commands, supported source ids, layout validation, legacy-config preservation |
 | `test/codex-roots.test.js` | Additive root discovery, path deduplication, live/archive and Multica layouts |
-| `test/grok.test.js` | Default-plus-extra stores, copied sessions, missing/unreadable configured roots |
+| `test/grok.test.js` | Default-plus-extra stores, copied sessions, missing/unreadable configured roots, `usage.json` ledger (1.0) incl. no-double-count with ACP usage, signals-based format canary |
 | `test/pi-compatible.test.js` | Extra-root layouts, overlapping paths, copied records, missing/unreadable roots |
 | `test/state.test.js` | Pruning only sources whose parsers succeeded |
 

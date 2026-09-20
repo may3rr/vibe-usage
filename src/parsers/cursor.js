@@ -264,7 +264,25 @@ export async function parse() {
   const cacheReadIdx = idx('Cache Read');
   const outputIdx = idx('Output Tokens');
 
-  if (dateIdx < 0 || modelIdx < 0) return { buckets: [], sessions: [] };
+  // A renamed column used to degrade silently: every row then parsed as zero
+  // tokens, the run uploaded an empty snapshot, and sync.js pruned Cursor's
+  // incremental state as if the account had gone quiet — the dashboard just
+  // stopped counting Cursor. Treat a header we do not recognise as a skipped
+  // run instead: the state survives and the user gets a warning.
+  const hasTokenColumn =
+    inputCacheWriteIdx >= 0 || inputNoCacheIdx >= 0 || cacheReadIdx >= 0 || outputIdx >= 0;
+  if (dateIdx < 0 || modelIdx < 0 || !hasTokenColumn) {
+    return {
+      buckets: [],
+      sessions: [],
+      skipped: true,
+      warnings: [
+        'cursor: 导出表头与预期不符（需要 Date、Model 及至少一个 token 列），本次已跳过以保护增量状态；' +
+        'Cursor 可能更改了导出接口，请反馈。' +
+        `当前表头: ${header.slice(0, 8).join(', ')}`,
+      ],
+    };
+  }
 
   const entries = [];
   for (let r = 1; r < rows.length; r++) {
